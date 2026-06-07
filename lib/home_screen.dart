@@ -1,78 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'add_note_screen.dart';
+import 'edit_note_screen.dart';
 
-class HomeScreen extends StatefulWidget {
+class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
 
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> {
-  final _firestore = FirebaseFirestore.instance;
-  final _dataController = TextEditingController();
-  bool _isSaving = false;
-
-  @override
-  void dispose() {
-    _dataController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _addData() async {
-    final user = FirebaseAuth.instance.currentUser;
-    final text = _dataController.text.trim();
-
-    if (user == null || text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Data tidak boleh kosong!')),
-      );
-      return;
-    }
-
-    setState(() => _isSaving = true);
-
-    try {
-      await _firestore.collection('user_data').add({
-        'text': text,
-        'createdAt': Timestamp.now(),
-        'userId': user.uid,
-        'userEmail': user.email,
-      });
-      _dataController.clear();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Data berhasil disimpan!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Gagal menyimpan: ${e.toString()}')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSaving = false);
-    }
-  }
-
-  Future<void> _deleteData(String docId) async {
-    await _firestore.collection('user_data').doc(docId).delete();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Data berhasil dihapus.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-    }
-  }
-
-  Future<void> _confirmLogout() async {
+  Future<void> _confirmLogout(BuildContext context) async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -95,11 +30,49 @@ class _HomeScreenState extends State<HomeScreen> {
     if (confirm == true) await FirebaseAuth.instance.signOut();
   }
 
+  Future<void> _deleteNote(BuildContext context, String docId) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Hapus Catatan'),
+        content: const Text('Catatan ini akan dihapus permanen.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Batal'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Hapus',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await FirebaseFirestore.instance
+          .collection('notes')
+          .doc(docId)
+          .delete();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Catatan berhasil dihapus.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   String _formatDate(Timestamp timestamp) {
     final date = timestamp.toDate();
-    return '${date.day}/${date.month}/${date.year} '
-        '${date.hour.toString().padLeft(2, '0')}:'
-        '${date.minute.toString().padLeft(2, '0')}';
+    final months = [
+      '', 'Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun',
+      'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'
+    ];
+    return '${date.day} ${months[date.month]} ${date.year}';
   }
 
   @override
@@ -108,190 +81,277 @@ class _HomeScreenState extends State<HomeScreen> {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
+      backgroundColor: colorScheme.surface,
       appBar: AppBar(
-        title: const Text('Flutter Firebase Demo',
-            style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text(
+          '📚 StudyNotes',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         backgroundColor: colorScheme.primaryContainer,
         actions: [
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
-            onPressed: _confirmLogout,
+            onPressed: () => _confirmLogout(context),
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Info user
-            Card(
-              elevation: 0,
-              color: colorScheme.primaryContainer,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
+      body: StreamBuilder<QuerySnapshot>(
+        // Query sederhana tanpa orderBy untuk hindari error index
+        stream: FirebaseFirestore.instance
+            .collection('notes')
+            .where('userId', isEqualTo: user?.uid)
+            .snapshots(),
+        builder: (ctx, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(
               child: Padding(
                 padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.error_outline,
+                        size: 48, color: Colors.red),
+                    const SizedBox(height: 8),
+                    Text('Error: ${snapshot.error}',
+                        textAlign: TextAlign.center),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          // Sort di client side, tidak perlu index
+          final docs = snapshot.data?.docs ?? [];
+          docs.sort((a, b) {
+            final aTime =
+                (a.data() as Map)['createdAt'] as Timestamp;
+            final bTime =
+                (b.data() as Map)['createdAt'] as Timestamp;
+            return bTime.compareTo(aTime);
+          });
+
+          return Column(
+            children: [
+              // Info user + jumlah catatan
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                color: colorScheme.primaryContainer.withOpacity(0.5),
                 child: Row(
                   children: [
                     CircleAvatar(
                       backgroundColor: colorScheme.primary,
-                      child: Icon(Icons.person, color: colorScheme.onPrimary),
+                      child:
+                          Icon(Icons.person, color: colorScheme.onPrimary),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Selamat datang!',
+                          const Text('Halo,',
                               style: TextStyle(fontSize: 12)),
                           Text(
                             user?.email ?? 'Pengguna',
                             style: const TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 14),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ],
                       ),
                     ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: colorScheme.primary,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        '${docs.length} Catatan',
+                        style: TextStyle(
+                            color: colorScheme.onPrimary,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ),
                   ],
                 ),
               ),
-            ),
-            const SizedBox(height: 20),
 
-            // Input data
-            Text('Tambah Data Baru',
-                style: Theme.of(context)
-                    .textTheme
-                    .titleMedium
-                    ?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _dataController,
-                    textInputAction: TextInputAction.done,
-                    onSubmitted: (_) => _addData(),
-                    decoration: const InputDecoration(
-                      labelText: 'Masukkan data baru',
-                      hintText: 'Ketik sesuatu...',
-                      prefixIcon: Icon(Icons.edit_outlined),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                SizedBox(
-                  height: 56,
-                  child: ElevatedButton(
-                    onPressed: _isSaving ? null : _addData,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: colorScheme.primary,
-                      foregroundColor: colorScheme.onPrimary,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                    ),
-                    child: _isSaving
-                        ? const SizedBox(
-                            height: 20,
-                            width: 20,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white),
-                          )
-                        : const Icon(Icons.save),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-
-            // List data
-            Text('Data Tersimpan',
-                style: Theme.of(context)
-                    .textTheme
-                    .titleMedium
-                    ?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-
-            Expanded(
-              child: StreamBuilder<QuerySnapshot>(
-                stream: _firestore
-                    .collection('user_data')
-                    .where('userId', isEqualTo: user?.uid)
-                    .orderBy('createdAt', descending: true)
-                    .snapshots(),
-                builder: (ctx, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (snapshot.hasError) {
-                    return Center(child: Text('Error: ${snapshot.error}'));
-                  }
-                  if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.inbox_outlined,
-                              size: 64,
-                              color: colorScheme.onSurfaceVariant
-                                  .withOpacity(0.4)),
-                          const SizedBox(height: 12),
-                          Text('Belum ada data.',
+              // List catatan
+              Expanded(
+                child: docs.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.note_outlined,
+                                size: 80,
+                                color: colorScheme.onSurfaceVariant
+                                    .withOpacity(0.3)),
+                            const SizedBox(height: 16),
+                            Text(
+                              'Belum ada catatan',
                               style: TextStyle(
-                                  color: colorScheme.onSurfaceVariant)),
-                        ],
-                      ),
-                    );
-                  }
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: colorScheme.onSurfaceVariant),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Tap tombol + untuk menambah catatan',
+                              style: TextStyle(
+                                  color: colorScheme.onSurfaceVariant
+                                      .withOpacity(0.7)),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: docs.length,
+                        itemBuilder: (ctx, index) {
+                          final doc = docs[index];
+                          final data =
+                              doc.data() as Map<String, dynamic>;
 
-                  final docs = snapshot.data!.docs;
-                  return ListView.builder(
-                    itemCount: docs.length,
-                    itemBuilder: (ctx, index) {
-                      final doc = docs[index];
-                      final data = doc.data() as Map<String, dynamic>;
-                      return Card(
-                        elevation: 0,
-                        margin: const EdgeInsets.only(bottom: 8),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          side: BorderSide(color: colorScheme.outlineVariant),
-                        ),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: colorScheme.secondaryContainer,
-                            child: Text('${index + 1}',
-                                style: TextStyle(
-                                    color: colorScheme.onSecondaryContainer,
-                                    fontWeight: FontWeight.bold)),
-                          ),
-                          title: Text(data['text'] ?? '',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w500)),
-                          subtitle: Text(
-                            _formatDate(data['createdAt'] as Timestamp),
-                            style: TextStyle(
-                                fontSize: 12,
-                                color: colorScheme.onSurfaceVariant),
-                          ),
-                          trailing: IconButton(
-                            icon: Icon(Icons.delete_outline,
-                                color: colorScheme.error),
-                            onPressed: () => _deleteData(doc.id),
-                            tooltip: 'Hapus',
-                          ),
-                        ),
-                      );
-                    },
-                  );
-                },
+                          return Card(
+                            elevation: 0,
+                            margin: const EdgeInsets.only(bottom: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              side: BorderSide(
+                                  color: colorScheme.outlineVariant),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Container(
+                                        padding:
+                                            const EdgeInsets.symmetric(
+                                                horizontal: 10,
+                                                vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: colorScheme
+                                              .secondaryContainer,
+                                          borderRadius:
+                                              BorderRadius.circular(20),
+                                        ),
+                                        child: Text(
+                                          data['subject'] ?? '',
+                                          style: TextStyle(
+                                              fontSize: 11,
+                                              color: colorScheme
+                                                  .onSecondaryContainer,
+                                              fontWeight:
+                                                  FontWeight.w600),
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      Text(
+                                        data['createdAt'] != null
+                                            ? _formatDate(data[
+                                                    'createdAt']
+                                                as Timestamp)
+                                            : '',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: colorScheme
+                                                .onSurfaceVariant),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    data['title'] ?? '',
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 16),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    data['content'] ?? '',
+                                    style: TextStyle(
+                                        color:
+                                            colorScheme.onSurfaceVariant,
+                                        fontSize: 13),
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.end,
+                                    children: [
+                                      OutlinedButton.icon(
+                                        onPressed: () {
+                                          Navigator.push(
+                                            context,
+                                            MaterialPageRoute(
+                                              builder: (_) =>
+                                                  EditNoteScreen(
+                                                docId: doc.id,
+                                                title:
+                                                    data['title'] ?? '',
+                                                subject:
+                                                    data['subject'] ??
+                                                        '',
+                                                content:
+                                                    data['content'] ??
+                                                        '',
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                        icon: const Icon(Icons.edit,
+                                            size: 16),
+                                        label: const Text('Edit'),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      ElevatedButton.icon(
+                                        onPressed: () => _deleteNote(
+                                            context, doc.id),
+                                        icon: const Icon(Icons.delete,
+                                            size: 16),
+                                        label: const Text('Hapus'),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.red,
+                                          foregroundColor: Colors.white,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
               ),
-            ),
-          ],
-        ),
+            ],
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const AddNoteScreen()),
+          );
+        },
+        icon: const Icon(Icons.add),
+        label: const Text('Tambah Catatan'),
       ),
     );
   }
